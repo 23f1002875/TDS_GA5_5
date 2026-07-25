@@ -7,22 +7,26 @@ function respond(res, decision, reason) {
   return res.status(200).json({ decision, reason });
 }
 
+// ---------- coercion helpers ----------
+
+function toNumber(v) {
+  if (typeof v === 'number' && isFinite(v)) return v;
+  if (typeof v === 'string' && v.trim() !== '' && isFinite(Number(v))) return Number(v);
+  return 0;
+}
+
 // ---------- canonicalization ----------
 
-// Normalize whitespace inside a string value: collapse runs of whitespace
-// to a single space and trim.
 function normalizeWhitespace(str) {
   return str.replace(/\s+/g, ' ').trim();
 }
 
-// Recursively canonicalize a JSON value: sort object keys, drop any key
-// literally named "trace_id" at any depth, and normalize whitespace inside
-// string values. Returns a value suitable for deterministic stringification.
 function canonicalize(value) {
+  if (value === undefined || value === null) return null;
   if (Array.isArray(value)) {
     return value.map(canonicalize);
   }
-  if (value !== null && typeof value === 'object') {
+  if (typeof value === 'object') {
     const keys = Object.keys(value).filter((k) => k !== 'trace_id').sort();
     const out = {};
     for (const k of keys) {
@@ -37,26 +41,35 @@ function canonicalize(value) {
 }
 
 function canonicalKey(tool, args) {
-  return JSON.stringify({ tool, args: canonicalize(args === undefined ? null : args) });
+  const t = typeof tool === 'string' ? tool : String(tool);
+  const a = canonicalize(args === undefined ? {} : args);
+  return JSON.stringify({ tool: t, args: a });
 }
 
 // ---------- policy ----------
 
-function evaluate(budgetTokens, steps) {
-  if (!Array.isArray(steps) || steps.length === 0) {
+function evaluate(budgetTokens, rawSteps) {
+  if (!Array.isArray(rawSteps) || rawSteps.length === 0) {
     return { decision: 'continue', reason: 'No steps taken yet; nothing to evaluate.' };
   }
+
+  // Defensive: sort by step_number if present, to guarantee chronological order.
+  const steps = rawSteps.slice().sort((a, b) => {
+    const an = typeof a.step_number === 'number' ? a.step_number : 0;
+    const bn = typeof b.step_number === 'number' ? b.step_number : 0;
+    return an - bn;
+  });
 
   // ---- budget check ----
   let total = 0;
   for (const s of steps) {
-    const t = typeof s.tokens_used === 'number' && isFinite(s.tokens_used) ? s.tokens_used : 0;
-    total += t;
+    total += toNumber(s.tokens_used);
   }
-  if (total >= budgetTokens) {
+  const budget = toNumber(budgetTokens);
+  if (total >= budget) {
     return {
       decision: 'halt',
-      reason: `Cumulative tokens_used (${total}) has reached the budget (${budgetTokens}).`,
+      reason: `Cumulative tokens_used (${total}) has reached the budget (${budget}).`,
     };
   }
 
@@ -79,7 +92,7 @@ function evaluate(budgetTokens, steps) {
     }
   }
 
-  // ---- rule 2: 2-step alternating cycle A,B,A,B,A,B for >=6 trailing steps ----
+  // ---- rule 2: 2-step alternating cycle A,B,A,B,A,B for the trailing 6+ steps ----
   const n = keys.length;
   if (n >= 6) {
     const last6 = keys.slice(n - 6);
@@ -115,14 +128,7 @@ app.post('/check', (req, res) => {
       return respond(res, 'halt', 'Malformed request body.');
     }
 
-    const budgetTokens = body.budget_tokens;
-    const steps = body.steps;
-
-    if (typeof budgetTokens !== 'number' || !isFinite(budgetTokens)) {
-      return respond(res, 'halt', 'Malformed or missing budget_tokens.');
-    }
-
-    const { decision, reason } = evaluate(budgetTokens, steps);
+    const { decision, reason } = evaluate(body.budget_tokens, body.steps);
     return respond(res, decision, reason);
   } catch (err) {
     return respond(res, 'halt', 'Error while evaluating run history.');
