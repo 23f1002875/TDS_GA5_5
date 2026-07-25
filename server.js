@@ -108,7 +108,7 @@ function evaluate(budgetTokens, steps) {
 
 // ---------- endpoint ----------
 
-app.post('/run-budget-and-loop-guard', (req, res) => {
+app.post('/check', (req, res) => {
   try {
     const body = req.body;
     if (!body || typeof body !== 'object') {
